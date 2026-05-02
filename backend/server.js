@@ -1,274 +1,364 @@
-const express = require('express');
-const Database = require('better-sqlite3');
-const crypto = require('crypto');
-const bcrypt = {
-  hashSync: (pwd, _) => crypto.createHash('sha256').update(pwd + 'taskflow_salt').digest('hex'),
-  compareSync: (pwd, hash) => crypto.createHash('sha256').update(pwd + 'taskflow_salt').digest('hex') === hash
-};
-const jwt = require('jsonwebtoken');
-const cors = require('cors');
-const { body, validationResult } = require('express-validator');
+const express = require("express");
+const crypto = require("crypto");
+const jwt = require("jsonwebtoken");
+const cors = require("cors");
+const fs = require("fs");
 
 const app = express();
-const JWT_SECRET = process.env.JWT_SECRET || 'supersecret_taskmanager_2024';
+const JWT_SECRET = process.env.JWT_SECRET || "supersecret_taskflow_2024";
 const PORT = process.env.PORT || 5000;
+const DB_PATH = process.env.DB_PATH || "./db.json";
 
 app.use(cors());
 app.use(express.json());
 
-// ─── DB SETUP ─────────────────────────────────────────────────────────────────
-const db = new Database(process.env.DB_PATH || './taskmanager.db');
+const bcrypt = {
+  hash: (pwd) =>
+    crypto
+      .createHash("sha256")
+      .update(pwd + "_taskflow_s4lt_")
+      .digest("hex"),
+  compare: (pwd, hash) =>
+    crypto
+      .createHash("sha256")
+      .update(pwd + "_taskflow_s4lt_")
+      .digest("hex") === hash,
+};
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    email TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL,
-    role TEXT DEFAULT 'member' CHECK(role IN ('admin','member')),
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
+const initDB = () => ({
+  users: [],
+  projects: [],
+  project_members: [],
+  tasks: [],
+});
+const loadDB = () => {
+  try {
+    if (fs.existsSync(DB_PATH))
+      return JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
+  } catch (e) {}
+  return initDB();
+};
+const saveDB = (db) => {
+  try {
+    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+  } catch (e) {}
+};
+let db = loadDB();
+const nextId = (arr) =>
+  arr.length === 0 ? 1 : Math.max(...arr.map((x) => x.id)) + 1;
+const now = () => new Date().toISOString();
 
-  CREATE TABLE IF NOT EXISTS projects (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    description TEXT,
-    owner_id INTEGER NOT NULL,
-    status TEXT DEFAULT 'active' CHECK(status IN ('active','completed','archived')),
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (owner_id) REFERENCES users(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS project_members (
-    project_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    role TEXT DEFAULT 'member' CHECK(role IN ('admin','member')),
-    PRIMARY KEY (project_id, user_id),
-    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    description TEXT,
-    project_id INTEGER NOT NULL,
-    assigned_to INTEGER,
-    created_by INTEGER NOT NULL,
-    status TEXT DEFAULT 'todo' CHECK(status IN ('todo','in_progress','done')),
-    priority TEXT DEFAULT 'medium' CHECK(priority IN ('low','medium','high')),
-    due_date DATE,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-    FOREIGN KEY (assigned_to) REFERENCES users(id),
-    FOREIGN KEY (created_by) REFERENCES users(id)
-  );
-`);
-
-// ─── MIDDLEWARE ────────────────────────────────────────────────────────────────
 const auth = (req, res, next) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'No token' });
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "No token" });
   try {
     req.user = jwt.verify(token, JWT_SECRET);
     next();
-  } catch { res.status(401).json({ error: 'Invalid token' }); }
+  } catch {
+    res.status(401).json({ error: "Invalid token" });
+  }
 };
 
-const adminOnly = (req, res, next) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  next();
-};
-
-const validationMiddleware = (req, res, next) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
-  next();
-};
-
-// ─── AUTH ROUTES ───────────────────────────────────────────────────────────────
-app.post('/api/auth/signup',
-  [body('email').isEmail(), body('password').isLength({ min: 6 }), body('name').notEmpty()],
-  validationMiddleware,
-  (req, res) => {
-    const { name, email, password, role = 'member' } = req.body;
-    const hash = bcrypt.hashSync(password, 10);
-    try {
-      const stmt = db.prepare('INSERT INTO users (name, email, password, role) VALUES (?,?,?,?)');
-      const result = stmt.run(name, email, hash, role === 'admin' ? 'admin' : 'member');
-      const user = db.prepare('SELECT id, name, email, role FROM users WHERE id=?').get(result.lastInsertRowid);
-      const token = jwt.sign({ id: user.id, email: user.email, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '7d' });
-      res.status(201).json({ token, user });
-    } catch (e) {
-      if (e.message.includes('UNIQUE')) return res.status(409).json({ error: 'Email already exists' });
-      res.status(500).json({ error: e.message });
-    }
-  }
-);
-
-app.post('/api/auth/login',
-  [body('email').isEmail(), body('password').notEmpty()],
-  validationMiddleware,
-  (req, res) => {
-    const { email, password } = req.body;
-    const user = db.prepare('SELECT * FROM users WHERE email=?').get(email);
-    if (!user || !bcrypt.compareSync(password, user.password))
-      return res.status(401).json({ error: 'Invalid credentials' });
-    const token = jwt.sign({ id: user.id, email: user.email, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '7d' });
-    const { password: _, ...safeUser } = user;
-    res.json({ token, user: safeUser });
-  }
-);
-
-app.get('/api/auth/me', auth, (req, res) => {
-  const user = db.prepare('SELECT id, name, email, role, created_at FROM users WHERE id=?').get(req.user.id);
-  res.json(user);
-});
-
-// ─── USERS ROUTES ──────────────────────────────────────────────────────────────
-app.get('/api/users', auth, (req, res) => {
-  const users = db.prepare('SELECT id, name, email, role, created_at FROM users').all();
-  res.json(users);
-});
-
-// ─── PROJECT ROUTES ────────────────────────────────────────────────────────────
-app.get('/api/projects', auth, (req, res) => {
-  let projects;
-  if (req.user.role === 'admin') {
-    projects = db.prepare(`
-      SELECT p.*, u.name as owner_name,
-        (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id) as task_count,
-        (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.status='done') as done_count
-      FROM projects p JOIN users u ON p.owner_id = u.id
-      ORDER BY p.created_at DESC
-    `).all();
-  } else {
-    projects = db.prepare(`
-      SELECT p.*, u.name as owner_name,
-        (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id) as task_count,
-        (SELECT COUNT(*) FROM tasks t WHERE t.project_id = p.id AND t.status='done') as done_count
-      FROM projects p JOIN users u ON p.owner_id = u.id
-      WHERE p.owner_id = ? OR p.id IN (SELECT project_id FROM project_members WHERE user_id=?)
-      ORDER BY p.created_at DESC
-    `).all(req.user.id, req.user.id);
-  }
-  res.json(projects);
-});
-
-app.post('/api/projects', auth,
-  [body('name').notEmpty()],
-  validationMiddleware,
-  (req, res) => {
-    const { name, description } = req.body;
-    const result = db.prepare('INSERT INTO projects (name, description, owner_id) VALUES (?,?,?)').run(name, description, req.user.id);
-    db.prepare('INSERT OR IGNORE INTO project_members (project_id, user_id, role) VALUES (?,?,?)').run(result.lastInsertRowid, req.user.id, 'admin');
-    const project = db.prepare('SELECT p.*, u.name as owner_name FROM projects p JOIN users u ON p.owner_id=u.id WHERE p.id=?').get(result.lastInsertRowid);
-    res.status(201).json(project);
-  }
-);
-
-app.get('/api/projects/:id', auth, (req, res) => {
-  const project = db.prepare('SELECT p.*, u.name as owner_name FROM projects p JOIN users u ON p.owner_id=u.id WHERE p.id=?').get(req.params.id);
-  if (!project) return res.status(404).json({ error: 'Project not found' });
-  const members = db.prepare('SELECT u.id, u.name, u.email, pm.role FROM project_members pm JOIN users u ON pm.user_id=u.id WHERE pm.project_id=?').all(req.params.id);
-  res.json({ ...project, members });
-});
-
-app.put('/api/projects/:id', auth, (req, res) => {
-  const { name, description, status } = req.body;
-  const project = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id);
-  if (!project) return res.status(404).json({ error: 'Not found' });
-  if (project.owner_id !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-  db.prepare('UPDATE projects SET name=?, description=?, status=? WHERE id=?').run(name || project.name, description ?? project.description, status || project.status, req.params.id);
-  res.json(db.prepare('SELECT p.*, u.name as owner_name FROM projects p JOIN users u ON p.owner_id=u.id WHERE p.id=?').get(req.params.id));
-});
-
-app.delete('/api/projects/:id', auth, (req, res) => {
-  const project = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id);
-  if (!project) return res.status(404).json({ error: 'Not found' });
-  if (project.owner_id !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-  db.prepare('DELETE FROM projects WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
-});
-
-app.post('/api/projects/:id/members', auth, (req, res) => {
-  const { user_id, role = 'member' } = req.body;
-  const project = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id);
-  if (!project) return res.status(404).json({ error: 'Not found' });
-  if (project.owner_id !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-  db.prepare('INSERT OR REPLACE INTO project_members (project_id, user_id, role) VALUES (?,?,?)').run(req.params.id, user_id, role);
-  res.json({ message: 'Member added' });
-});
-
-// ─── TASK ROUTES ───────────────────────────────────────────────────────────────
-app.get('/api/projects/:id/tasks', auth, (req, res) => {
-  const tasks = db.prepare(`
-    SELECT t.*, u.name as assignee_name, c.name as creator_name
-    FROM tasks t
-    LEFT JOIN users u ON t.assigned_to = u.id
-    JOIN users c ON t.created_by = c.id
-    WHERE t.project_id = ?
-    ORDER BY t.created_at DESC
-  `).all(req.params.id);
-  res.json(tasks);
-});
-
-app.post('/api/projects/:id/tasks', auth,
-  [body('title').notEmpty()],
-  validationMiddleware,
-  (req, res) => {
-    const { title, description, assigned_to, priority = 'medium', due_date, status = 'todo' } = req.body;
-    const result = db.prepare('INSERT INTO tasks (title, description, project_id, assigned_to, created_by, priority, due_date, status) VALUES (?,?,?,?,?,?,?,?)').run(title, description, req.params.id, assigned_to || null, req.user.id, priority, due_date || null, status);
-    const task = db.prepare(`SELECT t.*, u.name as assignee_name, c.name as creator_name FROM tasks t LEFT JOIN users u ON t.assigned_to=u.id JOIN users c ON t.created_by=c.id WHERE t.id=?`).get(result.lastInsertRowid);
-    res.status(201).json(task);
-  }
-);
-
-app.put('/api/tasks/:id', auth, (req, res) => {
-  const task = db.prepare('SELECT * FROM tasks WHERE id=?').get(req.params.id);
-  if (!task) return res.status(404).json({ error: 'Not found' });
-  const { title, description, assigned_to, priority, due_date, status } = req.body;
-  db.prepare('UPDATE tasks SET title=?, description=?, assigned_to=?, priority=?, due_date=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?').run(
-    title ?? task.title, description ?? task.description, assigned_to ?? task.assigned_to,
-    priority ?? task.priority, due_date ?? task.due_date, status ?? task.status, req.params.id
+app.post("/api/auth/signup", (req, res) => {
+  const { name, email, password, role = "member" } = req.body;
+  if (!name || !email || !password)
+    return res.status(400).json({ error: "Name, email and password required" });
+  if (password.length < 6)
+    return res
+      .status(400)
+      .json({ error: "Password must be at least 6 characters" });
+  db = loadDB();
+  if (db.users.find((u) => u.email === email))
+    return res.status(409).json({ error: "Email already exists" });
+  const user = {
+    id: nextId(db.users),
+    name,
+    email,
+    password: bcrypt.hash(password),
+    role: role === "admin" ? "admin" : "member",
+    created_at: now(),
+  };
+  db.users.push(user);
+  saveDB(db);
+  const { password: _, ...safeUser } = user;
+  const token = jwt.sign(
+    { id: user.id, email: user.email, role: user.role, name: user.name },
+    JWT_SECRET,
+    { expiresIn: "7d" },
   );
-  const updated = db.prepare(`SELECT t.*, u.name as assignee_name, c.name as creator_name FROM tasks t LEFT JOIN users u ON t.assigned_to=u.id JOIN users c ON t.created_by=c.id WHERE t.id=?`).get(req.params.id);
-  res.json(updated);
+  res.status(201).json({ token, user: safeUser });
 });
 
-app.delete('/api/tasks/:id', auth, (req, res) => {
-  const task = db.prepare('SELECT * FROM tasks WHERE id=?').get(req.params.id);
-  if (!task) return res.status(404).json({ error: 'Not found' });
-  db.prepare('DELETE FROM tasks WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+app.post("/api/auth/login", (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password)
+    return res.status(400).json({ error: "Email and password required" });
+  db = loadDB();
+  const user = db.users.find((u) => u.email === email);
+  if (!user || !bcrypt.compare(password, user.password))
+    return res.status(401).json({ error: "Invalid credentials" });
+  const { password: _, ...safeUser } = user;
+  const token = jwt.sign(
+    { id: user.id, email: user.email, role: user.role, name: user.name },
+    JWT_SECRET,
+    { expiresIn: "7d" },
+  );
+  res.json({ token, user: safeUser });
 });
 
-// ─── DASHBOARD STATS ──────────────────────────────────────────────────────────
-app.get('/api/dashboard', auth, (req, res) => {
+app.get("/api/auth/me", auth, (req, res) => {
+  db = loadDB();
+  const user = db.users.find((u) => u.id === req.user.id);
+  if (!user) return res.status(404).json({ error: "User not found" });
+  const { password: _, ...safeUser } = user;
+  res.json(safeUser);
+});
+
+app.get("/api/users", auth, (req, res) => {
+  db = loadDB();
+  res.json(db.users.map(({ password: _, ...u }) => u));
+});
+
+const enrichProject = (p, db) => {
+  const owner = db.users.find((u) => u.id === p.owner_id);
+  const tasks = db.tasks.filter((t) => t.project_id === p.id);
+  return {
+    ...p,
+    owner_name: owner?.name || "Unknown",
+    task_count: tasks.length,
+    done_count: tasks.filter((t) => t.status === "done").length,
+  };
+};
+
+app.get("/api/projects", auth, (req, res) => {
+  db = loadDB();
+  let projects = db.projects;
+  if (req.user.role !== "admin") {
+    const memberOf = db.project_members
+      .filter((m) => m.user_id === req.user.id)
+      .map((m) => m.project_id);
+    projects = projects.filter(
+      (p) => p.owner_id === req.user.id || memberOf.includes(p.id),
+    );
+  }
+  res.json(projects.map((p) => enrichProject(p, db)).reverse());
+});
+
+app.post("/api/projects", auth, (req, res) => {
+  const { name, description } = req.body;
+  if (!name) return res.status(400).json({ error: "Name required" });
+  db = loadDB();
+  const project = {
+    id: nextId(db.projects),
+    name,
+    description: description || "",
+    owner_id: req.user.id,
+    status: "active",
+    created_at: now(),
+  };
+  db.projects.push(project);
+  db.project_members.push({
+    project_id: project.id,
+    user_id: req.user.id,
+    role: "admin",
+  });
+  saveDB(db);
+  res.status(201).json(enrichProject(project, db));
+});
+
+app.get("/api/projects/:id", auth, (req, res) => {
+  db = loadDB();
+  const project = db.projects.find((p) => p.id === parseInt(req.params.id));
+  if (!project) return res.status(404).json({ error: "Not found" });
+  const members = db.project_members
+    .filter((m) => m.project_id === project.id)
+    .map((m) => {
+      const user = db.users.find((u) => u.id === m.user_id);
+      return user
+        ? { id: user.id, name: user.name, email: user.email, role: m.role }
+        : null;
+    })
+    .filter(Boolean);
+  res.json({ ...enrichProject(project, db), members });
+});
+
+app.put("/api/projects/:id", auth, (req, res) => {
+  db = loadDB();
+  const idx = db.projects.findIndex((p) => p.id === parseInt(req.params.id));
+  if (idx === -1) return res.status(404).json({ error: "Not found" });
+  const project = db.projects[idx];
+  if (project.owner_id !== req.user.id && req.user.role !== "admin")
+    return res.status(403).json({ error: "Forbidden" });
+  const { name, description, status } = req.body;
+  db.projects[idx] = {
+    ...project,
+    name: name || project.name,
+    description: description ?? project.description,
+    status: status || project.status,
+  };
+  saveDB(db);
+  res.json(enrichProject(db.projects[idx], db));
+});
+
+app.delete("/api/projects/:id", auth, (req, res) => {
+  db = loadDB();
+  const project = db.projects.find((p) => p.id === parseInt(req.params.id));
+  if (!project) return res.status(404).json({ error: "Not found" });
+  if (project.owner_id !== req.user.id && req.user.role !== "admin")
+    return res.status(403).json({ error: "Forbidden" });
+  db.projects = db.projects.filter((p) => p.id !== project.id);
+  db.tasks = db.tasks.filter((t) => t.project_id !== project.id);
+  db.project_members = db.project_members.filter(
+    (m) => m.project_id !== project.id,
+  );
+  saveDB(db);
+  res.json({ message: "Deleted" });
+});
+
+app.post("/api/projects/:id/members", auth, (req, res) => {
+  const { user_id, role = "member" } = req.body;
+  db = loadDB();
+  const project = db.projects.find((p) => p.id === parseInt(req.params.id));
+  if (!project) return res.status(404).json({ error: "Not found" });
+  if (project.owner_id !== req.user.id && req.user.role !== "admin")
+    return res.status(403).json({ error: "Forbidden" });
+  db.project_members = db.project_members.filter(
+    (m) => !(m.project_id === project.id && m.user_id === parseInt(user_id)),
+  );
+  db.project_members.push({
+    project_id: project.id,
+    user_id: parseInt(user_id),
+    role,
+  });
+  saveDB(db);
+  res.json({ message: "Member added" });
+});
+
+const enrichTask = (t, db) => {
+  const assignee = db.users.find((u) => u.id === t.assigned_to);
+  const creator = db.users.find((u) => u.id === t.created_by);
+  return {
+    ...t,
+    assignee_name: assignee?.name || null,
+    creator_name: creator?.name || "Unknown",
+  };
+};
+
+app.get("/api/projects/:id/tasks", auth, (req, res) => {
+  db = loadDB();
+  const tasks = db.tasks.filter(
+    (t) => t.project_id === parseInt(req.params.id),
+  );
+  res.json(tasks.map((t) => enrichTask(t, db)).reverse());
+});
+
+app.post("/api/projects/:id/tasks", auth, (req, res) => {
+  const {
+    title,
+    description,
+    assigned_to,
+    priority = "medium",
+    due_date,
+    status = "todo",
+  } = req.body;
+  if (!title) return res.status(400).json({ error: "Title required" });
+  db = loadDB();
+  const task = {
+    id: nextId(db.tasks),
+    title,
+    description: description || "",
+    project_id: parseInt(req.params.id),
+    assigned_to: assigned_to ? parseInt(assigned_to) : null,
+    created_by: req.user.id,
+    priority,
+    due_date: due_date || null,
+    status,
+    created_at: now(),
+    updated_at: now(),
+  };
+  db.tasks.push(task);
+  saveDB(db);
+  res.status(201).json(enrichTask(task, db));
+});
+
+app.put("/api/tasks/:id", auth, (req, res) => {
+  db = loadDB();
+  const idx = db.tasks.findIndex((t) => t.id === parseInt(req.params.id));
+  if (idx === -1) return res.status(404).json({ error: "Not found" });
+  const task = db.tasks[idx];
+  const { title, description, assigned_to, priority, due_date, status } =
+    req.body;
+  db.tasks[idx] = {
+    ...task,
+    title: title ?? task.title,
+    description: description ?? task.description,
+    assigned_to:
+      assigned_to !== undefined
+        ? assigned_to
+          ? parseInt(assigned_to)
+          : null
+        : task.assigned_to,
+    priority: priority ?? task.priority,
+    due_date: due_date !== undefined ? due_date : task.due_date,
+    status: status ?? task.status,
+    updated_at: now(),
+  };
+  saveDB(db);
+  res.json(enrichTask(db.tasks[idx], db));
+});
+
+app.delete("/api/tasks/:id", auth, (req, res) => {
+  db = loadDB();
+  const task = db.tasks.find((t) => t.id === parseInt(req.params.id));
+  if (!task) return res.status(404).json({ error: "Not found" });
+  db.tasks = db.tasks.filter((t) => t.id !== task.id);
+  saveDB(db);
+  res.json({ message: "Deleted" });
+});
+
+app.get("/api/dashboard", auth, (req, res) => {
+  db = loadDB();
   const userId = req.user.id;
-  const isAdmin = req.user.role === 'admin';
-
+  const isAdmin = req.user.role === "admin";
   const myTasks = isAdmin
-    ? db.prepare('SELECT * FROM tasks').all()
-    : db.prepare('SELECT * FROM tasks WHERE assigned_to=? OR created_by=?').all(userId, userId);
-
-  const overdue = myTasks.filter(t => t.due_date && new Date(t.due_date) < new Date() && t.status !== 'done').length;
+    ? db.tasks
+    : db.tasks.filter(
+        (t) => t.assigned_to === userId || t.created_by === userId,
+      );
+  const overdue = myTasks.filter(
+    (t) =>
+      t.due_date && new Date(t.due_date) < new Date() && t.status !== "done",
+  ).length;
   const byStatus = { todo: 0, in_progress: 0, done: 0 };
-  myTasks.forEach(t => byStatus[t.status]++);
-
+  myTasks.forEach((t) => {
+    if (byStatus[t.status] !== undefined) byStatus[t.status]++;
+  });
+  const memberOf = db.project_members
+    .filter((m) => m.user_id === userId)
+    .map((m) => m.project_id);
   const projects = isAdmin
-    ? db.prepare('SELECT COUNT(*) as count FROM projects').get().count
-    : db.prepare('SELECT COUNT(DISTINCT p.id) as count FROM projects p WHERE p.owner_id=? OR p.id IN (SELECT project_id FROM project_members WHERE user_id=?)').get(userId, userId).count;
-
-  const recentTasks = db.prepare(`
-    SELECT t.*, u.name as assignee_name, p.name as project_name
-    FROM tasks t LEFT JOIN users u ON t.assigned_to=u.id JOIN projects p ON t.project_id=p.id
-    ${isAdmin ? '' : 'WHERE t.assigned_to=? OR t.created_by=?'}
-    ORDER BY t.updated_at DESC LIMIT 5
-  `).all(...(isAdmin ? [] : [userId, userId]));
-
-  res.json({ myTasks: myTasks.length, overdue, byStatus, projects, recentTasks });
+    ? db.projects.length
+    : db.projects.filter(
+        (p) => p.owner_id === userId || memberOf.includes(p.id),
+      ).length;
+  const allTasks = isAdmin ? db.tasks : myTasks;
+  const recentTasks = [...allTasks]
+    .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
+    .slice(0, 5)
+    .map((t) => {
+      const project = db.projects.find((p) => p.id === t.project_id);
+      return { ...enrichTask(t, db), project_name: project?.name || "Unknown" };
+    });
+  res.json({
+    myTasks: myTasks.length,
+    overdue,
+    byStatus,
+    projects,
+    recentTasks,
+  });
 });
 
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.get("/", (req, res) =>
+  res.json({ status: "TaskFlow API running", version: "1.0.0" }),
+);
+app.listen(PORT, () => console.log("TaskFlow server on port " + PORT));
