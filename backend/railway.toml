@@ -1,0 +1,7 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "node server.js"
+healthcheckPath = "/api/dashboard"
+restartPolicyType = "on_failure"

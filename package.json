@@ -1,0 +1,13 @@
+{
+  "name": "taskflow",
+  "version": "1.0.0",
+  "scripts": {
+    "backend": "cd backend && node server.js",
+    "frontend": "cd frontend && npm start",
+    "install:all": "cd backend && npm install && cd ../frontend && npm install",
+    "start": "concurrently \"npm run backend\" \"npm run frontend\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
