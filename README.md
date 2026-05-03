@@ -4,7 +4,7 @@
 
 ### Full-Stack Team Task Manager with Role-Based Access Control
 
-[![Live Demo](https://img.shields.io/badge/Live%20Demo-Visit%20App-6366f1?style=for-the-badge&logo=vercel)](https://your-app.vercel.app)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Visit%20App-6366f1?style=for-the-badge&logo=vercel)](https://taskmanager-frontend-dusky.vercel.app/)
 [![Backend](https://img.shields.io/badge/Backend-Live%20on%20Render-10b981?style=for-the-badge&logo=render)](https://taskmanager-3egl.onrender.com)
 [![GitHub Release](https://img.shields.io/github/v/release/yourusername/taskflow?style=for-the-badge)](https://github.com/yourusername/taskflow/releases)
 [![License](https://img.shields.io/badge/License-MIT-f59e0b?style=for-the-badge)](LICENSE)
