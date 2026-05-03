@@ -30,6 +30,7 @@ const initDB = () => ({
   projects: [],
   project_members: [],
   tasks: [],
+  organizations: [],
 });
 const loadDB = () => {
   try {
@@ -44,9 +45,14 @@ const saveDB = (db) => {
   } catch (e) {}
 };
 let db = loadDB();
+if (!db.organizations) {
+  db.organizations = [];
+  saveDB(db);
+}
 const nextId = (arr) =>
   arr.length === 0 ? 1 : Math.max(...arr.map((x) => x.id)) + 1;
 const now = () => new Date().toISOString();
+const genPassword = () => crypto.randomBytes(4).toString("hex"); // 8 char random password
 
 const auth = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
@@ -59,6 +65,13 @@ const auth = (req, res, next) => {
   }
 };
 
+const adminOnly = (req, res, next) => {
+  if (req.user.role !== "admin")
+    return res.status(403).json({ error: "Admins only" });
+  next();
+};
+
+// ─── AUTH ──────────────────────────────────────────────────────────────────────
 app.post("/api/auth/signup", (req, res) => {
   const { name, email, password, role = "member" } = req.body;
   if (!name || !email || !password)
@@ -76,6 +89,8 @@ app.post("/api/auth/signup", (req, res) => {
     email,
     password: bcrypt.hash(password),
     role: role === "admin" ? "admin" : "member",
+    created_by_admin: null,
+    org_id: null,
     created_at: now(),
   };
   db.users.push(user);
@@ -114,11 +129,106 @@ app.get("/api/auth/me", auth, (req, res) => {
   res.json(safeUser);
 });
 
-app.get("/api/users", auth, (req, res) => {
+// Change password
+app.put("/api/auth/change-password", auth, (req, res) => {
+  const { current_password, new_password } = req.body;
+  if (!current_password || !new_password)
+    return res.status(400).json({ error: "Both fields required" });
+  if (new_password.length < 6)
+    return res
+      .status(400)
+      .json({ error: "New password must be at least 6 characters" });
   db = loadDB();
-  res.json(db.users.map(({ password: _, ...u }) => u));
+  const idx = db.users.findIndex((u) => u.id === req.user.id);
+  if (idx === -1) return res.status(404).json({ error: "User not found" });
+  if (!bcrypt.compare(current_password, db.users[idx].password))
+    return res.status(401).json({ error: "Current password is incorrect" });
+  db.users[idx].password = bcrypt.hash(new_password);
+  saveDB(db);
+  res.json({ message: "Password changed successfully" });
 });
 
+// ─── USERS ─────────────────────────────────────────────────────────────────────
+// Admin gets only their own members; superadmin sees all
+app.get("/api/users", auth, (req, res) => {
+  db = loadDB();
+  if (req.user.role === "admin") {
+    // Admin sees only members they created
+    const myMembers = db.users.filter(
+      (u) => u.created_by_admin === req.user.id || u.id === req.user.id,
+    );
+    res.json(myMembers.map(({ password: _, ...u }) => u));
+  } else {
+    res.json(
+      db.users
+        .filter((u) => u.id === req.user.id)
+        .map(({ password: _, ...u }) => u),
+    );
+  }
+});
+
+// Admin creates a member with generated credentials
+app.post("/api/admin/create-member", auth, adminOnly, (req, res) => {
+  const { name, email } = req.body;
+  if (!name || !email)
+    return res.status(400).json({ error: "Name and email required" });
+  db = loadDB();
+  if (db.users.find((u) => u.email === email))
+    return res.status(409).json({ error: "Email already exists" });
+  const plainPassword = genPassword();
+  const user = {
+    id: nextId(db.users),
+    name,
+    email,
+    password: bcrypt.hash(plainPassword),
+    role: "member",
+    created_by_admin: req.user.id,
+    org_id: req.user.id, // org = admin who created them
+    created_at: now(),
+  };
+  db.users.push(user);
+  saveDB(db);
+  const { password: _, ...safeUser } = user;
+  // Return plain password so admin can share it
+  res
+    .status(201)
+    .json({ user: safeUser, credentials: { email, password: plainPassword } });
+});
+
+// Admin resets a member's password
+app.post(
+  "/api/admin/reset-member-password/:id",
+  auth,
+  adminOnly,
+  (req, res) => {
+    db = loadDB();
+    const idx = db.users.findIndex((u) => u.id === parseInt(req.params.id));
+    if (idx === -1) return res.status(404).json({ error: "User not found" });
+    if (db.users[idx].created_by_admin !== req.user.id)
+      return res.status(403).json({ error: "Not your member" });
+    const plainPassword = genPassword();
+    db.users[idx].password = bcrypt.hash(plainPassword);
+    saveDB(db);
+    res.json({
+      credentials: { email: db.users[idx].email, password: plainPassword },
+    });
+  },
+);
+
+// Admin removes a member
+app.delete("/api/admin/members/:id", auth, adminOnly, (req, res) => {
+  db = loadDB();
+  const user = db.users.find((u) => u.id === parseInt(req.params.id));
+  if (!user) return res.status(404).json({ error: "Not found" });
+  if (user.created_by_admin !== req.user.id)
+    return res.status(403).json({ error: "Not your member" });
+  db.users = db.users.filter((u) => u.id !== user.id);
+  db.project_members = db.project_members.filter((m) => m.user_id !== user.id);
+  saveDB(db);
+  res.json({ message: "Member removed" });
+});
+
+// ─── PROJECTS ─────────────────────────────────────────────────────────────────
 const enrichProject = (p, db) => {
   const owner = db.users.find((u) => u.id === p.owner_id);
   const tasks = db.tasks.filter((t) => t.project_id === p.id);
@@ -140,6 +250,9 @@ app.get("/api/projects", auth, (req, res) => {
     projects = projects.filter(
       (p) => p.owner_id === req.user.id || memberOf.includes(p.id),
     );
+  } else {
+    // Admin sees only their own projects
+    projects = projects.filter((p) => p.owner_id === req.user.id);
   }
   res.json(projects.map((p) => enrichProject(p, db)).reverse());
 });
@@ -215,6 +328,7 @@ app.delete("/api/projects/:id", auth, (req, res) => {
   res.json({ message: "Deleted" });
 });
 
+// Add member to project — admin can only add their own members
 app.post("/api/projects/:id/members", auth, (req, res) => {
   const { user_id, role = "member" } = req.body;
   db = loadDB();
@@ -222,6 +336,16 @@ app.post("/api/projects/:id/members", auth, (req, res) => {
   if (!project) return res.status(404).json({ error: "Not found" });
   if (project.owner_id !== req.user.id && req.user.role !== "admin")
     return res.status(403).json({ error: "Forbidden" });
+  // Check member belongs to this admin
+  const targetUser = db.users.find((u) => u.id === parseInt(user_id));
+  if (!targetUser) return res.status(404).json({ error: "User not found" });
+  if (
+    req.user.role === "admin" &&
+    targetUser.created_by_admin !== req.user.id &&
+    targetUser.id !== req.user.id
+  ) {
+    return res.status(403).json({ error: "You can only add your own members" });
+  }
   db.project_members = db.project_members.filter(
     (m) => !(m.project_id === project.id && m.user_id === parseInt(user_id)),
   );
@@ -234,6 +358,21 @@ app.post("/api/projects/:id/members", auth, (req, res) => {
   res.json({ message: "Member added" });
 });
 
+app.delete("/api/projects/:id/members/:uid", auth, (req, res) => {
+  db = loadDB();
+  const project = db.projects.find((p) => p.id === parseInt(req.params.id));
+  if (!project) return res.status(404).json({ error: "Not found" });
+  if (project.owner_id !== req.user.id && req.user.role !== "admin")
+    return res.status(403).json({ error: "Forbidden" });
+  db.project_members = db.project_members.filter(
+    (m) =>
+      !(m.project_id === project.id && m.user_id === parseInt(req.params.uid)),
+  );
+  saveDB(db);
+  res.json({ message: "Member removed" });
+});
+
+// ─── TASKS ─────────────────────────────────────────────────────────────────────
 const enrichTask = (t, db) => {
   const assignee = db.users.find((u) => u.id === t.assigned_to);
   const creator = db.users.find((u) => u.id === t.created_by);
@@ -246,10 +385,12 @@ const enrichTask = (t, db) => {
 
 app.get("/api/projects/:id/tasks", auth, (req, res) => {
   db = loadDB();
-  const tasks = db.tasks.filter(
-    (t) => t.project_id === parseInt(req.params.id),
+  res.json(
+    db.tasks
+      .filter((t) => t.project_id === parseInt(req.params.id))
+      .map((t) => enrichTask(t, db))
+      .reverse(),
   );
-  res.json(tasks.map((t) => enrichTask(t, db)).reverse());
 });
 
 app.post("/api/projects/:id/tasks", auth, (req, res) => {
@@ -316,12 +457,16 @@ app.delete("/api/tasks/:id", auth, (req, res) => {
   res.json({ message: "Deleted" });
 });
 
+// ─── DASHBOARD ─────────────────────────────────────────────────────────────────
 app.get("/api/dashboard", auth, (req, res) => {
   db = loadDB();
   const userId = req.user.id;
   const isAdmin = req.user.role === "admin";
   const myTasks = isAdmin
-    ? db.tasks
+    ? db.tasks.filter((t) => {
+        const proj = db.projects.find((p) => p.id === t.project_id);
+        return proj && proj.owner_id === userId;
+      })
     : db.tasks.filter(
         (t) => t.assigned_to === userId || t.created_by === userId,
       );
@@ -337,12 +482,14 @@ app.get("/api/dashboard", auth, (req, res) => {
     .filter((m) => m.user_id === userId)
     .map((m) => m.project_id);
   const projects = isAdmin
-    ? db.projects.length
+    ? db.projects.filter((p) => p.owner_id === userId).length
     : db.projects.filter(
         (p) => p.owner_id === userId || memberOf.includes(p.id),
       ).length;
-  const allTasks = isAdmin ? db.tasks : myTasks;
-  const recentTasks = [...allTasks]
+  const myMembers = isAdmin
+    ? db.users.filter((u) => u.created_by_admin === userId).length
+    : 0;
+  const recentTasks = [...myTasks]
     .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
     .slice(0, 5)
     .map((t) => {
@@ -355,10 +502,11 @@ app.get("/api/dashboard", auth, (req, res) => {
     byStatus,
     projects,
     recentTasks,
+    myMembers,
   });
 });
 
 app.get("/", (req, res) =>
-  res.json({ status: "TaskFlow API running", version: "1.0.0" }),
+  res.json({ status: "TaskFlow API running", version: "2.0.0" }),
 );
 app.listen(PORT, () => console.log("TaskFlow server on port " + PORT));
