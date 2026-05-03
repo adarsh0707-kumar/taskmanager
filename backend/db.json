@@ -1,0 +1,65 @@
+{
+  "users": [
+    {
+      "id": 1,
+      "name": "Adarsh",
+      "email": "adarsh@gmail.com",
+      "password": "f0691e439676fddff56f929b2e6b3634337fa9717d6ab8d0b48a770c80d85695",
+      "role": "admin",
+      "created_at": "2026-05-02T08:26:52.528Z"
+    },
+    {
+      "id": 2,
+      "name": "adarsh member",
+      "email": "member@example.com",
+      "password": "8b729a4816613111f10685c7227565cb97772d0a50bd4104db1e4481186f4866",
+      "role": "member",
+      "created_at": "2026-05-02T08:30:04.143Z"
+    }
+  ],
+  "projects": [
+    {
+      "id": 1,
+      "name": "my first project",
+      "description": "first project\n",
+      "owner_id": 1,
+      "status": "active",
+      "created_at": "2026-05-02T08:27:38.976Z"
+    }
+  ],
+  "project_members": [
+    {
+      "project_id": 1,
+      "user_id": 1,
+      "role": "admin"
+    }
+  ],
+  "tasks": [
+    {
+      "id": 1,
+      "title": "login",
+      "description": "make a ui",
+      "project_id": 1,
+      "assigned_to": 1,
+      "created_by": 1,
+      "priority": "low",
+      "due_date": "2026-05-03",
+      "status": "done",
+      "created_at": "2026-05-02T08:28:15.003Z",
+      "updated_at": "2026-05-02T08:28:56.813Z"
+    },
+    {
+      "id": 2,
+      "title": "signup ",
+      "description": "make ui\n",
+      "project_id": 1,
+      "assigned_to": 1,
+      "created_by": 1,
+      "priority": "medium",
+      "due_date": null,
+      "status": "todo",
+      "created_at": "2026-05-02T08:29:21.449Z",
+      "updated_at": "2026-05-02T08:29:21.449Z"
+    }
+  ]
+}
