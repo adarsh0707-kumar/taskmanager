@@ -36,7 +36,7 @@ A production-ready full-stack web application where teams can create projects, a
 
 | Service | URL | Status |
 |---------|-----|--------|
-| **Frontend** | [your-app.vercel.app](https://your-app.vercel.app) | ✅ Live |
+| **Frontend** | [https://taskmanager-frontend-dusky.vercel.app](https://taskmanager-frontend-dusky.vercel.app) | ✅ Live |
 | **Backend API** | [taskmanager-3egl.onrender.com](https://taskmanager-3egl.onrender.com) | ✅ Live |
 
 > ⚠️ **Note:** The backend runs on Render's free tier and may take 30–60 seconds to wake up after inactivity. Please be patient on first load.
